@@ -1,0 +1,23 @@
+# Anonymizační výstupy (testovací soubory)
+*_anon.docx
+*_map.json
+*_map.txt
+
+# Testovací logy
+test_output.txt
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
