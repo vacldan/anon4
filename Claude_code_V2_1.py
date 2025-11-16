@@ -167,6 +167,13 @@ SURNAME_BLACKLIST = {
     'institut','instituce','instituci','korporace','korporaci','koncern','koncernu',
     'holding','holdingu','group','skupiny','skupina','družstvo','družstva',
     'invest','investment','capital','kapitál','kapitalu','partners','consulting',
+    # KRITICKÁ OPRAVA: Zdravotnické a právní organizace (audit smluv 13-16)
+    'poliklinika','polikliniky','klinika','kliniky','clinic','cliniec','hospital','nemocnice',
+    'notářská','notářské','notářský','notarska','notarske','notarsky','notář','notar',
+    'data','dat','processing','protection','gdpr','compliance',
+    'london','paris','berlin','vienna','met','mayo','mayo cliniec',
+    # KRITICKÁ OPRAVA: Obecné termíny (ne osoby)
+    'svoboda','svobody','svobodu','svobodou',  # může být příjmení i termín - v kontextu "Svoboda Notářská" je organizace
 
     # KRITICKÁ OPRAVA: Role a ne-jména (zabránit "Rodiča Petr", "Učitelka Marie")
     'rodič','rodiče','rodiča','rodičů','rodičům','rodičích','rodičem',
@@ -905,8 +912,45 @@ ICO_RE     = re.compile(r'\bIČO\s*:?\s*(\d{8})\b', re.IGNORECASE)
 DIC_RE     = re.compile(r'\bDIČ\s*:?\s*(CZ\d{8,10})\b', re.IGNORECASE)
 
 # IBAN a BIC/SWIFT (GDPR - mezinárodní bankovní údaje)
-IBAN_RE    = re.compile(r'\b([A-Z]{2}\d{2}[A-Z0-9]{11,30})\b')  # IBAN: 2 písmena země + 2 číslice + 11-30 znaků
+# KRITICKÁ OPRAVA: IBAN detekce podporuje mezery (formát CZ65 0800 0000 0028 4756 3921)
+IBAN_RE    = re.compile(r'\b(?:IBAN\s*:?\s*)?([A-Z]{2}\d{2}[A-Z0-9\s]{11,32})\b', re.IGNORECASE)
 BIC_RE     = re.compile(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b')  # BIC/SWIFT: 8 nebo 11 znaků
+
+# KRITICKÁ OPRAVA: Platební karty (Visa, MasterCard, atd.)
+# Podporuje 13-19 číslic s mezerami nebo pomlčkami
+CARD_RE    = re.compile(
+    r'\b(?:Platební\s+karta|Číslo\s+karty|Karta)\s*:?\s*(\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4,7})\b',
+    re.IGNORECASE
+)
+
+# KRITICKÁ OPRAVA: IP adresy (IPv4)
+IP_RE      = re.compile(r'\b(?:IP\s+adresa|IP)\s*:?\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b',
+                       re.IGNORECASE)
+
+# KRITICKÁ OPRAVA: Hesla a credentials
+PASSWORD_RE = re.compile(r'\b(?:Initial\s+password|Password|Heslo)\s*:?\s*(\S+)', re.IGNORECASE)
+
+# KRITICKÁ OPRAVA: Usernames, loginy, účty
+USERNAME_RE = re.compile(r'\b(?:Login|Username|Uživatel|User|Account\s+ID)\s*:?\s*([A-Za-z0-9._\-@]+)', re.IGNORECASE)
+
+# KRITICKÁ OPRAVA: API klíče a tajemství
+API_KEY_RE  = re.compile(
+    r'\b(?:AWS\s+Access\s+Key|AWS\s+Secret|API\s+Key|Stripe\s+API|SendGrid\s+API|Secret\s+Key)\s*:?\s*([A-Za-z0-9+/=]{20,})',
+    re.IGNORECASE
+)
+
+# KRITICKÁ OPRAVA: Čísla pojištěnců (zdravotní identifikátory)
+INSURANCE_ID_RE = re.compile(r'\b(?:Číslo\s+pojištěnce|Pojištěnec|Zdravotní\s+pojištění)\s*:?\s*(\d{9,10})', re.IGNORECASE)
+
+# KRITICKÁ OPRAVA: RFID karty a badge
+RFID_RE    = re.compile(r'\b(?:RFID\s+karta|RFID|Badge|ID\s+karta)\s*:?\s*([A-Za-z0-9\-_/]+)', re.IGNORECASE)
+
+# KRITICKÁ OPRAVA: Řidičské průkazy
+DRIVER_LICENSE_RE = re.compile(r'\b(?:Řidičský\s+průkaz|Řidičák)\s*.*?(?:č\.|číslo)\s*([A-Z0-9\s\-]+)', re.IGNORECASE)
+
+# KRITICKÁ OPRAVA: Částky (aby se nezaměňovaly s telefony)
+# Detekuje částky ve formátu "150 000 000", "1 500 000 Kč", atd.
+AMOUNT_RE  = re.compile(r'\b(\d{1,3}(?:\s\d{3}){2,})\s*(?:Kč|EUR|USD|CZK)?\b')
 
 # Osobní číslo zaměstnance
 EMP_ID_RE  = re.compile(r'\b(?:osobn[íi]\s+č[íi]slo(?:\s+zaměstnance)?|zaměstnaneck[éeě]\s+č[íi]slo)\s*:?\s*(\d+)\b', re.IGNORECASE)
@@ -1644,6 +1688,15 @@ class Anonymizer:
 
         text = BIRTHPLACE_RE.sub(birthplace_repl, text)
 
+        # KRITICKÁ OPRAVA: Částky PŘED telefony (aby se "150 000 000" nedetekoval jako PHONE)
+        def amount_repl(m):
+            v = m.group(1)
+            tag = self._get_or_create_tag('AMOUNT', v)
+            self._record_value(tag, v)
+            # Vrátit celý match (včetně měny pokud je)
+            return m.group(0).replace(v, tag)
+        text = AMOUNT_RE.sub(amount_repl, text)
+
         def phone_repl(m):
             v = m.group(0)
             s, e = m.span()
@@ -1724,8 +1777,23 @@ class Anonymizer:
             return full_match.replace(dic_num, tag)
         text = DIC_RE.sub(dic_repl, text)
 
+        # KRITICKÁ OPRAVA: Platební karty (PŘED IBAN)
+        def card_repl(m):
+            card_num = m.group(1)
+            tag = self._get_or_create_tag('CARD', card_num)
+            self._record_value(tag, card_num)
+            return m.group(0).replace(card_num, tag)
+        text = CARD_RE.sub(card_repl, text)
+
         # GDPR: IBAN (mezinárodní bankovní účet)
-        text = self._replace_entity(text, IBAN_RE, 'IBAN')
+        def iban_repl(m):
+            iban_num = m.group(1)
+            # Normalizuj IBAN (odstraň mezery pro ukládání)
+            iban_normalized = iban_num.replace(' ', '')
+            tag = self._get_or_create_tag('IBAN', iban_normalized)
+            self._record_value(tag, iban_normalized)
+            return m.group(0).replace(iban_num, tag)
+        text = IBAN_RE.sub(iban_repl, text)
 
         # GDPR: BIC/SWIFT (identifikátor banky) - s kontrolou kontextu
         # KRITICKÁ OPRAVA: "SYNERGIE" není BIC, je to název projektu
@@ -1807,6 +1875,68 @@ class Anonymizer:
             return tag
         text = IDCARD_RE.sub(id_repl, text)
 
+        # KRITICKÁ OPRAVA: IP adresy
+        def ip_repl(m):
+            ip_addr = m.group(1)
+            tag = self._get_or_create_tag('IP', ip_addr)
+            self._record_value(tag, ip_addr)
+            return m.group(0).replace(ip_addr, tag)
+        text = IP_RE.sub(ip_repl, text)
+
+        # KRITICKÁ OPRAVA: Hesla (NIKDY neukládat hodnotu do mapy!)
+        def password_repl(m):
+            password_value = m.group(1)
+            # Vytvoř tag ale NEUKLÁDEJ hodnotu (bezpečnost!)
+            self.counter['PASSWORD'] += 1
+            tag = f'[[PASSWORD_{self.counter["PASSWORD"]}]]'
+            # Zaznamenej pouze placeholder, ne skutečné heslo
+            self.tag_map[tag] = ['********']
+            return m.group(0).replace(password_value, tag)
+        text = PASSWORD_RE.sub(password_repl, text)
+
+        # KRITICKÁ OPRAVA: API klíče a tajemství (NIKDY neukládat hodnotu!)
+        def api_key_repl(m):
+            api_key_value = m.group(1)
+            # Vytvoř tag ale NEUKLÁDEJ hodnotu (bezpečnost!)
+            self.counter['API_KEY'] += 1
+            tag = f'[[API_KEY_{self.counter["API_KEY"]}]]'
+            # Zaznamenej pouze placeholder, ne skutečný klíč
+            self.tag_map[tag] = ['********']
+            return m.group(0).replace(api_key_value, tag)
+        text = API_KEY_RE.sub(api_key_repl, text)
+
+        # KRITICKÁ OPRAVA: Usernames a loginy
+        def username_repl(m):
+            username = m.group(1)
+            tag = self._get_or_create_tag('USERNAME', username)
+            self._record_value(tag, username)
+            return m.group(0).replace(username, tag)
+        text = USERNAME_RE.sub(username_repl, text)
+
+        # KRITICKÁ OPRAVA: Čísla pojištěnců
+        def insurance_repl(m):
+            insurance_num = m.group(1)
+            tag = self._get_or_create_tag('INSURANCE_ID', insurance_num)
+            self._record_value(tag, insurance_num)
+            return m.group(0).replace(insurance_num, tag)
+        text = INSURANCE_ID_RE.sub(insurance_repl, text)
+
+        # KRITICKÁ OPRAVA: RFID karty
+        def rfid_repl(m):
+            rfid_num = m.group(1)
+            tag = self._get_or_create_tag('RFID', rfid_num)
+            self._record_value(tag, rfid_num)
+            return m.group(0).replace(rfid_num, tag)
+        text = RFID_RE.sub(rfid_repl, text)
+
+        # KRITICKÁ OPRAVA: Řidičské průkazy
+        def driver_license_repl(m):
+            license_num = m.group(1).strip()
+            tag = self._get_or_create_tag('DRIVER_LICENSE', license_num)
+            self._record_value(tag, license_num)
+            return m.group(0).replace(m.group(1), tag)
+        text = DRIVER_LICENSE_RE.sub(driver_license_repl, text)
+
         # Osobní číslo zaměstnance
         def emp_id_repl(m):
             full_match = m.group(0)
@@ -1818,6 +1948,51 @@ class Anonymizer:
         text = EMP_ID_RE.sub(emp_id_repl, text)
 
         return text
+
+    def end_scan_for_leaks(self, text: str) -> list:
+        """
+        KRITICKÁ FUNKCE: Kontrola zbylých leaků po anonymizaci
+        Vrací seznam nalezených leaků pro audit
+        """
+        leaks = []
+
+        # Kontrola IBANů (včetně nalepených za ]])
+        iban_pattern = re.compile(r'(?:\]\])?([A-Z]{2}\s?\d{2}(?:\s?\d{4}){3,7})(?!\]\])', re.IGNORECASE)
+        for m in iban_pattern.finditer(text):
+            if '[[IBAN_' not in text[max(0, m.start()-20):m.start()]:
+                leaks.append(f"IBAN leak: {m.group(1)} at position {m.start()}")
+
+        # Kontrola platebních karet
+        card_pattern = re.compile(r'(?:\]\])?(\d{4}[\s\-]\d{4}[\s\-]\d{4}[\s\-]\d{4,7})(?!\]\])')
+        for m in card_pattern.finditer(text):
+            if '[[CARD_' not in text[max(0, m.start()-20):m.start()]:
+                leaks.append(f"CARD leak: {m.group(1)[:7]}... at position {m.start()}")
+
+        # Kontrola IP adres
+        ip_pattern = re.compile(r'(?:\]\])?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?!\]\])')
+        for m in ip_pattern.finditer(text):
+            if '[[IP_' not in text[max(0, m.start()-20):m.start()]:
+                leaks.append(f"IP leak: {m.group(1)} at position {m.start()}")
+
+        # Kontrola hesel
+        password_pattern = re.compile(r'(?:Initial\s+password|Password|Heslo)\s*:?\s*([^\[\s]\S+)', re.IGNORECASE)
+        for m in password_pattern.finditer(text):
+            if '[[PASSWORD_' not in text[max(0, m.start()-20):m.start()]:
+                leaks.append(f"PASSWORD leak at position {m.start()}")
+
+        # Kontrola API klíčů
+        api_pattern = re.compile(r'(?:AWS\s+Access\s+Key|AWS\s+Secret|API\s+Key|Stripe|SendGrid)\s*:?\s*([^\[\s][A-Za-z0-9+/=]{20,})', re.IGNORECASE)
+        for m in api_pattern.finditer(text):
+            if '[[API_KEY_' not in text[max(0, m.start()-20):m.start()]:
+                leaks.append(f"API_KEY leak at position {m.start()}")
+
+        # Kontrola usernames
+        username_pattern = re.compile(r'(?:Login|Username|User)\s*:?\s*([^\[\s][A-Za-z0-9._\-@]+)', re.IGNORECASE)
+        for m in username_pattern.finditer(text):
+            if '[[USERNAME_' not in text[max(0, m.start()-20):m.start()]:
+                leaks.append(f"USERNAME leak: {m.group(1)} at position {m.start()}")
+
+        return leaks
 
     def post_merge_person_tags(self, doc: Document):
         key_to_tags = defaultdict(set)
@@ -1886,6 +2061,19 @@ class Anonymizer:
 
         self.post_merge_person_tags(doc)
 
+        # KRITICKÁ KONTROLA: End-scan pro detekci zbylých leaků
+        final_text_pieces = []
+        for p in iter_paragraphs(doc):
+            final_text_pieces.append(get_text(p))
+        final_text = '\n'.join(final_text_pieces)
+
+        leaks = self.end_scan_for_leaks(final_text)
+        if leaks:
+            print("\n⚠️  VAROVÁNÍ: End-scan našel potenciální leaky:")
+            for leak in leaks:
+                print(f"   - {leak}")
+            print("⚠️  Doporučuji zkontrolovat výstupní dokument!\n")
+
         # Post-processing: Normalizace mezer kolem tagů (kosmetika pro enterprise reports)
         # Zajistí správné mezery: "Tel.:[[PHONE]]" → "Tel.: [[PHONE]]", "[[EMAIL]],[[PHONE]]" → "[[EMAIL]], [[PHONE]]"
         for p in iter_paragraphs(doc):
@@ -1917,11 +2105,20 @@ class Anonymizer:
                 ("BANKOVNÍ ÚČTY", "BANK"),
                 ("IBAN", "IBAN"),
                 ("BIC/SWIFT", "BIC"),
+                ("PLATEBNÍ KARTY", "CARD"),
                 ("TELEFONY", "PHONE"),
                 ("EMAILY", "EMAIL"),
                 ("OBČANSKÉ PRŮKAZY", "ID_CARD"),
+                ("ŘIDIČSKÉ PRŮKAZY", "DRIVER_LICENSE"),
                 ("POZNÁVACÍ ZNAČKY (SPZ/RZ)", "LICENSE_PLATE"),
                 ("VIN (VOZIDLA)", "VIN"),
+                ("ČÍSLA POJIŠTĚNCŮ", "INSURANCE_ID"),
+                ("RFID KARTY", "RFID"),
+                ("IP ADRESY", "IP"),
+                ("USERNAMES/ÚČTY", "USERNAME"),
+                ("HESLA", "PASSWORD"),
+                ("API KLÍČE", "API_KEY"),
+                ("ČÁSTKY", "AMOUNT"),
                 ("DATA", "DATE"),
                 ("ADRESY", "ADDRESS"),
                 ("MÍSTA NAROZENÍ", "PLACE"),
