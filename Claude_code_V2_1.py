@@ -1211,121 +1211,138 @@ class Anonymizer:
                 text = rx.sub(repl, text)
 
             # FÁZE 2: Nahrazení přivlastňovacích přídavných jmen (Novákův, Janin)
-            first_low, last_low = p['first'].lower(), p['last'].lower()
-            poss = set()
-            if first_low.endswith('a'):
-                stem = p['first'][:-1]
-                poss |= {stem+s for s in ['in','ina','iny','iné','inu','inou','iným','iných']}
-                if stem.endswith('tr'):
-                    poss |= {stem[:-1]+'ř'+s for s in ['in','ina','iny','iné','inu','inou','iným','iných']}
-            else:
-                poss |= {p['first']+'ův'} | {p['first']+'ov'+s for s in ['a','o','y','ě','ým','ých']}
-            if not last_low.endswith('ová'):
-                poss |= {p['last']+'ův'} | {p['last']+'ov'+s for s in ['a','o','y','ě','ým','ých']}
-            for token in sorted(list(poss), key=len, reverse=True):
-                rx = re.compile(r'(?<!\w)'+re.escape(token)+r'(?!\w)', re.IGNORECASE)
-                def repl2(m):
-                    surf = m.group(0)
-                    self._record_value(tag, surf)
-                    return preserve_case(surf, tag)
-                text = rx.sub(repl2, text)
+            # KRITICKÁ OPTIMALIZACE: Přeskoč Phase 2 pokud je příliš mnoho osob (>30)
+            if len(self.canonical_persons) <= 30:
+                first_low, last_low = p['first'].lower(), p['last'].lower()
+                poss = set()
+                if first_low.endswith('a'):
+                    stem = p['first'][:-1]
+                    poss |= {stem+s for s in ['in','ina','iny','iné','inu','inou','iným','iných']}
+                    if stem.endswith('tr'):
+                        poss |= {stem[:-1]+'ř'+s for s in ['in','ina','iny','iné','inu','inou','iným','iných']}
+                else:
+                    poss |= {p['first']+'ův'} | {p['first']+'ov'+s for s in ['a','o','y','ě','ým','ých']}
+                if not last_low.endswith('ová'):
+                    poss |= {p['last']+'ův'} | {p['last']+'ov'+s for s in ['a','o','y','ě','ým','ých']}
+                # OPTIMALIZACE: Omez počet possessive forms na max 15
+                poss_limited = sorted(list(poss), key=len, reverse=True)[:15]
+                for token in poss_limited:
+                    rx = re.compile(r'(?<!\w)'+re.escape(token)+r'(?!\w)', re.IGNORECASE)
+                    def repl2(m):
+                        surf = m.group(0)
+                        self._record_value(tag, surf)
+                        return preserve_case(surf, tag)
+                    text = rx.sub(repl2, text)
 
         # FÁZE 3: Nahrazení samostatných příjmení (bez křestního jména)
         # Příklad: "Horváthová pronajímá Procházkovi byt. Procházka platí Horváthové nájemné."
-        for p in self.canonical_persons:
-            tag = self._ensure_person_tag(p['first'], p['last'])
+        # KRITICKÁ OPTIMALIZACE: Pokud je příliš mnoho osob (>15), přeskočíme tuto fázi
+        # kvůli výkonnostním problémům (exponential backtracking)
+        if len(self.canonical_persons) <= 15:
+            for p in self.canonical_persons:
+                tag = self._ensure_person_tag(p['first'], p['last'])
 
-            # Generuj všechny pádové varianty příjmení
-            surname_variants = variants_for_surname(p['last'])
+                # Generuj všechny pádové varianty příjmení
+                surname_variants = variants_for_surname(p['last'])
 
-            # Také přidej varianty křestního jména pro kontrolu
-            first_variants = variants_for_first(p['first'])
-            # Normalizuj křestní jména pro kontrolu (lowercase pro case-insensitive matching)
-            first_variants_lower = {fv.lower() for fv in first_variants if fv}
+                # Také přidej varianty křestního jména pro kontrolu
+                first_variants = variants_for_first(p['first'])
+                # Normalizuj křestní jména pro kontrolu (lowercase pro case-insensitive matching)
+                first_variants_lower = {fv.lower() for fv in first_variants if fv}
 
-            for surname_var in sorted(surname_variants, key=len, reverse=True):
-                if not surname_var or len(surname_var) < 2:
-                    continue
+                # OPTIMALIZACE: Omez počet variant na max 20 pro výkon
+                surname_variants_limited = list(sorted(surname_variants, key=len, reverse=True))[:20]
 
-                # Jednoduchý regex pro nalezení příjmení jako samostatného slova
-                rx = re.compile(r'(?<!\w)' + re.escape(surname_var) + r'(?!\w)', re.IGNORECASE)
+                for surname_var in surname_variants_limited:
+                    if not surname_var or len(surname_var) < 2:
+                        continue
 
-                # Použijeme callback funkci, která zkontroluje kontext
-                def repl3_with_context(m):
-                    surf = m.group(0)
-                    start_pos = m.start()
-                    end_pos = m.end()
+                    # Jednoduchý regex pro nalezení příjmení jako samostatného slova
+                    rx = re.compile(r'(?<!\w)' + re.escape(surname_var) + r'(?!\w)', re.IGNORECASE)
 
-                    # DŮLEŽITÉ: Přeskoč příjmení uvnitř "(rozená Xxx)" nebo "(dříve Xxx)"
-                    # Toto zabraňuje kolizi tagů (např. "(rozená Nová)" nesloučí s "Adam Nový")
-                    context_before_wide = text[max(0, start_pos-30):start_pos]
-                    if re.search(r'\((?:rozená|roz\.?|dříve)\s+(?:[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]\w+\s+)?$', context_before_wide, re.IGNORECASE):
-                        # Příjmení je uvnitř "(rozená ...)" - přeskoč!
-                        return surf
+                    # Použijeme callback funkci, která zkontroluje kontext
+                    def repl3_with_context(m):
+                        surf = m.group(0)
+                        start_pos = m.start()
+                        end_pos = m.end()
 
-                    # Zkontroluj 50 znaků před a 50 znaků po
-                    context_before = text[max(0, start_pos-50):start_pos]
-                    context_after = text[end_pos:min(len(text), end_pos+50)]
+                        # DŮLEŽITÉ: Přeskoč příjmení uvnitř "(rozená Xxx)" nebo "(dříve Xxx)"
+                        # Toto zabraňuje kolizi tagů (např. "(rozená Nová)" nesloučí s "Adam Nový")
+                        context_before_wide = text[max(0, start_pos-30):start_pos]
+                        if re.search(r'\((?:rozená|roz\.?|dříve)\s+(?:[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]\w+\s+)?$', context_before_wide, re.IGNORECASE):
+                            # Příjmení je uvnitř "(rozená ...)" - přeskoč!
+                            return surf
 
-                    # Extrahuj poslední slovo před a první slovo po
-                    words_before = re.findall(r'\b\w+\b', context_before)
-                    words_after = re.findall(r'\b\w+\b', context_after)
+                        # Zkontroluj 50 znaků před a 50 znaků po
+                        context_before = text[max(0, start_pos-50):start_pos]
+                        context_after = text[end_pos:min(len(text), end_pos+50)]
 
-                    # Pokud poslední slovo je oslovení/titul (Paní, Pan, MUDr., atd.), IGNORUJ ho
-                    titles_and_salutations = {'pan', 'paní', 'pani', 'pana', 'panu', 'mudr', 'ing', 'mgr', 'judr', 'bc', 'doc', 'prof'}
-                    if words_before and words_before[-1].lower() in titles_and_salutations:
-                        # Odstraň titul ze seznamu slov před
-                        words_before = words_before[:-1]
+                        # Extrahuj poslední slovo před a první slovo po
+                        words_before = re.findall(r'\b\w+\b', context_before)
+                        words_after = re.findall(r'\b\w+\b', context_after)
 
-                    # Pokud poslední slovo před příjmením je křestní jméno, NENAHRAZUJ
-                    if words_before and words_before[-1].lower() in first_variants_lower:
-                        return surf  # Nech to být (je to součást celého jména)
+                        # Pokud poslední slovo je oslovení/titul (Paní, Pan, MUDr., atd.), IGNORUJ ho
+                        titles_and_salutations = {'pan', 'paní', 'pani', 'pana', 'panu', 'mudr', 'ing', 'mgr', 'judr', 'bc', 'doc', 'prof'}
+                        if words_before and words_before[-1].lower() in titles_and_salutations:
+                            # Odstraň titul ze seznamu slov před
+                            words_before = words_before[:-1]
 
-                    # Pokud první slovo po příjmení je křestní jméno, NENAHRAZUJ
-                    if words_after and words_after[0].lower() in first_variants_lower:
-                        return surf  # Nech to být
+                        # Pokud poslední slovo před příjmením je křestní jméno, NENAHRAZUJ
+                        if words_before and words_before[-1].lower() in first_variants_lower:
+                            return surf  # Nech to být (je to součást celého jména)
 
-                    # Jinak je to samostatné příjmení → anonymizuj
-                    self._record_value(tag, surf)
-                    return preserve_case(surf, tag)
+                        # Pokud první slovo po příjmení je křestní jméno, NENAHRAZUJ
+                        if words_after and words_after[0].lower() in first_variants_lower:
+                            return surf  # Nech to být
 
-                text = rx.sub(repl3_with_context, text)
+                        # Jinak je to samostatné příjmení → anonymizuj
+                        self._record_value(tag, surf)
+                        return preserve_case(surf, tag)
+
+                    text = rx.sub(repl3_with_context, text)
+        else:
+            # Pokud je příliš mnoho osob, pouze loguj varování
+            print(f"⚠️  Přeskakuji Phase 3 (standalone surnames) - příliš mnoho osob ({len(self.canonical_persons)})")
 
         # FÁZE 3b: Nahrazení slov z křestního jména (pro vietnamská/asijská jména kde je příjmení první)
         # Například: "Paní Nguyễn" kde "Nguyễn" je technicky v 'first', ale je to příjmení
-        for p in self.canonical_persons:
-            tag = self._ensure_person_tag(p['first'], p['last'])
+        # KRITICKÁ OPTIMALIZACE: Pokud je příliš mnoho osob (>20), přeskočíme tuto fázi
+        if len(self.canonical_persons) <= 20:
+            for p in self.canonical_persons:
+                tag = self._ensure_person_tag(p['first'], p['last'])
 
-            # Rozděl křestní jméno na slova (např. "Nguyễn Thị" -> ["Nguyễn", "Thị"])
-            first_words = p['first'].split()
+                # Rozděl křestní jméno na slova (např. "Nguyễn Thị" -> ["Nguyễn", "Thị"])
+                first_words = p['first'].split()
 
-            # Pro každé slovo z křestního jména (kromě velmi krátkých)
-            for word in first_words:
-                if len(word) < 3:  # Přeskoč velmi krátká slova
-                    continue
+                # Pro každé slovo z křestního jména (kromě velmi krátkých)
+                for word in first_words:
+                    if len(word) < 3:  # Přeskoč velmi krátká slova
+                        continue
 
-                # Pokud slovo vypadá jako příjmení (velké písmeno na začátku, delší než 3 znaky)
-                if word[0].isupper() and len(word) >= 3:
-                    rx = re.compile(r'(?<!\w)' + re.escape(word) + r'(?!\w)', re.IGNORECASE)
+                    # Pokud slovo vypadá jako příjmení (velké písmeno na začátku, delší než 3 znaky)
+                    if word[0].isupper() and len(word) >= 3:
+                        rx = re.compile(r'(?<!\w)' + re.escape(word) + r'(?!\w)', re.IGNORECASE)
 
-                    def repl3b(m):
-                        surf = m.group(0)
-                        start_pos = m.start()
+                        def repl3b(m):
+                            surf = m.group(0)
+                            start_pos = m.start()
 
-                        # Zkontroluj kontext
-                        context_before = text[max(0, start_pos-50):start_pos]
-                        words_before = re.findall(r'\b\w+\b', context_before)
+                            # Zkontroluj kontext
+                            context_before = text[max(0, start_pos-50):start_pos]
+                            words_before = re.findall(r'\b\w+\b', context_before)
 
-                        # Pokud je před slovem "Paní/Pan" nebo jiný titul, anonymizuj
-                        titles = {'pan', 'paní', 'pani', 'pana', 'panu', 'panem', 'mudr', 'ing', 'mgr'}
-                        if words_before and words_before[-1].lower() in titles:
-                            self._record_value(tag, surf)
-                            return preserve_case(surf, tag)
+                            # Pokud je před slovem "Paní/Pan" nebo jiný titul, anonymizuj
+                            titles = {'pan', 'paní', 'pani', 'pana', 'panu', 'panem', 'mudr', 'ing', 'mgr'}
+                            if words_before and words_before[-1].lower() in titles:
+                                self._record_value(tag, surf)
+                                return preserve_case(surf, tag)
 
-                        # Jinak nech to být
-                        return surf
+                            # Jinak nech to být
+                            return surf
 
-                    text = rx.sub(repl3b, text)
+                        text = rx.sub(repl3b, text)
+        else:
+            print(f"⚠️  Přeskakuji Phase 3b (Asian names) - příliš mnoho osob ({len(self.canonical_persons)})")
 
         # FÁZE 3.5: Speciální handler pro "(rozená Xxx)" / "(roz. Xxx)" / "(dříve Xxx)"
         # DŮLEŽITÉ: Musí být PO FÁZÍ 3 (aby už byly samostatná příjmení nahrazená jako [[PERSON_*]])
