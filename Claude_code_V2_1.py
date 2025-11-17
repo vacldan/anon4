@@ -2108,6 +2108,38 @@ class Anonymizer:
                 txt = re.sub(r'\s{2,}', ' ', txt)
                 set_text(p, txt)
 
+        # KRITICKÁ OPRAVA (MAJOR ERROR FIX): Renumberování PERSON tagů bez mezer
+        # Podle master audit prompt: PERSON numbering gaps = MAJOR ERROR (−1.0 bod)
+        # Příklad: [[PERSON_1]], [[PERSON_2]], [[PERSON_5]] → [[PERSON_1]], [[PERSON_2]], [[PERSON_3]]
+        person_tags = sorted([tag for tag in self.tag_map.keys() if tag.startswith("[[PERSON_")],
+                             key=lambda x: int(x.replace("[[PERSON_", "").replace("]]", "")))
+
+        if person_tags:
+            # Vytvoř mapování starý tag → nový tag
+            renumber_map = {}
+            for new_idx, old_tag in enumerate(person_tags, 1):
+                old_num = int(old_tag.replace("[[PERSON_", "").replace("]]", ""))
+                if old_num != new_idx:
+                    new_tag = f"[[PERSON_{new_idx}]]"
+                    renumber_map[old_tag] = new_tag
+
+            # Pokud je třeba renumberovat
+            if renumber_map:
+                # 1. Updatuj self.tag_map
+                new_tag_map = {}
+                for old_tag, values in self.tag_map.items():
+                    new_tag = renumber_map.get(old_tag, old_tag)
+                    new_tag_map[new_tag] = values
+                self.tag_map = new_tag_map
+
+                # 2. Updatuj text v dokumentu
+                for p in iter_paragraphs(doc):
+                    txt = get_text(p)
+                    if '[[PERSON_' in txt:
+                        for old_tag, new_tag in renumber_map.items():
+                            txt = txt.replace(old_tag, new_tag)
+                        set_text(p, txt)
+
         doc.save(output_path)
 
         data = OrderedDict((tag, self.tag_map[tag]) for tag in sorted(self.tag_map.keys()))
