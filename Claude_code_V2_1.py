@@ -872,7 +872,8 @@ ADDRESS_REVERSE_RE = re.compile(
 ACCT_RE    = re.compile(r'\b(?:\d{1,6}-)?\d{2,10}/\d{4}\b')
 BIRTHID_RE = re.compile(r'\b\d{6}\s*/\s*\d{3,4}\b')
 IDCARD_RE  = re.compile(r'\b\d{6,9}/\d{3,4}\b|\b\d{9}\b|[A-Z]{2,3}[ \t]?\d{6,9}\b')
-PHONE_RE   = re.compile(r'(?<!\d)(?:\+420|00420)?[ \t\-]?\d{3}[ \t\-]?\d{3}[ \t\-]?\d{3}(?!\s*/\d{4})\b')
+# KRITICKÁ OPRAVA: Rozšířený PHONE_RE pro detekci všech formátů včetně "420 777 111 222"
+PHONE_RE   = re.compile(r'(?<!\d)(?:\+420|420|00420)?\s?\d{3}\s?\d{3}\s?\d{3}(?!\s*/\d{4})\b')
 EMAIL_RE   = re.compile(r'[A-Za-z0-9._%+\-\u00C0-\u017F]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', re.UNICODE)
 DATE_RE    = re.compile(r'\b\d{1,2}\.\s*\d{1,2}\.\s*\d{4}\b')
 
@@ -1688,15 +1689,7 @@ class Anonymizer:
 
         text = BIRTHPLACE_RE.sub(birthplace_repl, text)
 
-        # KRITICKÁ OPRAVA: Částky PŘED telefony (aby se "150 000 000" nedetekoval jako PHONE)
-        def amount_repl(m):
-            v = m.group(1)
-            tag = self._get_or_create_tag('AMOUNT', v)
-            self._record_value(tag, v)
-            # Vrátit celý match (včetně měny pokud je)
-            return m.group(0).replace(v, tag)
-        text = AMOUNT_RE.sub(amount_repl, text)
-
+        # KRITICKÁ OPRAVA: Telefony PŘED částkami! (jinak "420 777 111 222" matchuje jako částka)
         def phone_repl(m):
             v = m.group(0)
             s, e = m.span()
@@ -1711,6 +1704,15 @@ class Anonymizer:
             self._record_value(tag, v)
             return tag
         text = PHONE_RE.sub(phone_repl, text)
+
+        # Částky AŽ PO telefonech (aby čísla jako "420 777 111 222" byla správně telefony)
+        def amount_repl(m):
+            v = m.group(1)
+            tag = self._get_or_create_tag('AMOUNT', v)
+            self._record_value(tag, v)
+            # Vrátit celý match (včetně měny pokud je)
+            return m.group(0).replace(v, tag)
+        text = AMOUNT_RE.sub(amount_repl, text)
 
         def acct_like(m):
             s, e = m.span()
